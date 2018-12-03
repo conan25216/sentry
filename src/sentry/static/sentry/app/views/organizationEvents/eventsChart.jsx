@@ -1,17 +1,31 @@
+import {pick, isDate, isEqualWith} from 'lodash';
 import {withRouter} from 'react-router';
 import PropTypes from 'prop-types';
 import React from 'react';
 import moment from 'moment';
 
+import {getFormattedDate} from 'app/utils/dates';
 import {t} from 'app/locale';
+import DataZoom from 'app/components/charts/components/dataZoom';
 import LineChart from 'app/components/charts/lineChart';
 import SentryTypes from 'app/sentryTypes';
+import ToolBox from 'app/components/charts/components/toolBox';
 import withApi from 'app/utils/withApi';
 
 import {EventsRequestWithParams} from './utils/eventsRequest';
 import EventsContext from './utils/eventsContext';
 
-class EventsChart extends React.PureComponent {
+const dateComparator = (value, other) => {
+  if (isDate(value) && isDate(other)) {
+    return +value === +other;
+  }
+
+  // returning undefined will use default comparator
+  return undefined;
+};
+
+const isEqualWithDates = (a, b) => isEqualWith(a, b, dateComparator);
+class EventsChart extends React.Component {
   static propTypes = {
     organization: SentryTypes.Organization,
     actions: PropTypes.object,
@@ -21,6 +35,29 @@ class EventsChart extends React.PureComponent {
 
   constructor(props) {
     super(props);
+    this.state = {
+      period: props.period,
+    };
+  }
+
+  shouldComponentUpdate(nextProps, nextState) {
+    const periodKeys = ['period', 'start', 'end'];
+    const nextPeriod = pick(nextProps, periodKeys);
+    const currentPeriod = pick(this.props, periodKeys);
+
+    console.log(currentPeriod, nextPeriod);
+
+    console.log('state', this.state, nextState);
+    if (
+      !isEqualWithDates(nextPeriod, currentPeriod) &&
+      !isEqualWithDates(nextPeriod, this.state)
+    ) {
+      console.log('sCU', true);
+      return true;
+    }
+
+    console.log('sCU', false);
+    return false;
   }
 
   handleDataZoom = (evt, chart) => {
@@ -29,21 +66,30 @@ class EventsChart extends React.PureComponent {
     const axis = xAxis[0];
     const [firstSeries] = series;
 
-    const start = moment(firstSeries.data[axis.rangeStart][0]).format(
-      moment.HTML5_FMT.DATETIME_LOCAL_MS
-    );
+    console.log(axis.rangeStart, firstSeries.data[axis.rangeStart]);
+    const start = moment.utc(firstSeries.data[axis.rangeStart][0]);
+    const startFormatted = start.format(moment.HTML5_FMT.DATETIME_LOCAL_MS);
 
     // Add a day so we go until the end of the day (e.g. next day at midnight)
-    const end = moment(firstSeries.data[axis.rangeEnd][0])
+    const end = moment
+      .utc(firstSeries.data[axis.rangeEnd][0])
       .add(1, 'day')
-      .subtract(1, 'second')
-      .format(moment.HTML5_FMT.DATETIME_LOCAL_MS);
+      .subtract(1, 'second');
+    const endFormatted = end.format(moment.HTML5_FMT.DATETIME_LOCAL_MS);
 
-    this.props.actions.updateParams({
-      statsPeriod: null,
-      start,
-      end,
-    });
+    this.setState(
+      {
+        period: null,
+        start: start.toDate(),
+        end: end.toDate(),
+      },
+      () =>
+        this.props.actions.updateParams({
+          statsPeriod: null,
+          start: startFormatted,
+          end: endFormatted,
+        })
+    );
   };
 
   handleChartClick = series => {
@@ -77,11 +123,7 @@ class EventsChart extends React.PureComponent {
     if ((typeof period === 'string' && period.endsWith('h')) || period === '1d') {
       interval = '1h';
       xAxisOptions.axisLabel = {
-        formatter: value =>
-          moment
-            .utc(value)
-            .local()
-            .format('LT'),
+        formatter: value => getFormattedDate(value, 'LT', {local: !utc}),
       };
     }
 
@@ -113,6 +155,20 @@ class EventsChart extends React.PureComponent {
                   right: '18px',
                 }}
                 xAxis={xAxisOptions}
+                dataZoom={DataZoom()}
+                toolBox={ToolBox(
+                  {},
+                  {
+                    dataZoom: {},
+                    restore: {
+                      title: 'Restore',
+                    },
+                  }
+                )}
+                onEvents={{
+                  datazoom: this.handleDataZoom,
+                  click: this.handleChartClick,
+                }}
               />
             );
           }}
