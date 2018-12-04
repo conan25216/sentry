@@ -1,4 +1,4 @@
-import {pick, isDate, isEqualWith} from 'lodash';
+import {pick, isDate, isEqual, isEqualWith} from 'lodash';
 import {withRouter} from 'react-router';
 import PropTypes from 'prop-types';
 import React from 'react';
@@ -25,11 +25,16 @@ const dateComparator = (value, other) => {
 };
 
 const isEqualWithDates = (a, b) => isEqualWith(a, b, dateComparator);
+const getDate = date =>
+  date ? moment.utc(date).format(moment.HTML5_FMT.DATETIME_LOCAL_SECONDS) : null;
+
 class EventsChart extends React.Component {
   static propTypes = {
     organization: SentryTypes.Organization,
     actions: PropTypes.object,
     period: PropTypes.string,
+    start: PropTypes.instanceOf(Date),
+    end: PropTypes.instanceOf(Date),
     utc: PropTypes.bool,
   };
 
@@ -37,28 +42,79 @@ class EventsChart extends React.Component {
     super(props);
     this.state = {
       period: props.period,
+      start: getDate(props.start),
+      end: getDate(props.end),
     };
+    this.history = [];
   }
 
+  // Need to be aggressive about not re-rendering because eCharts handles zoom so we
+  // don't want the component to update (unless parameters besides time period were changed)
   shouldComponentUpdate(nextProps, nextState) {
     const periodKeys = ['period', 'start', 'end'];
+    const otherKeys = ['environment', 'project', 'params', 'utc'];
     const nextPeriod = pick(nextProps, periodKeys);
     const currentPeriod = pick(this.props, periodKeys);
 
-    console.log(currentPeriod, nextPeriod);
-
-    console.log('state', this.state, nextState);
+    // We need state and props (via url params) to be different since zooming updates
+    // state and url params (and therefore state will be the same as nextProps) - whereas
+    // time range selector will only update url params, and tchart needs to re-render
     if (
-      !isEqualWithDates(nextPeriod, currentPeriod) &&
-      !isEqualWithDates(nextPeriod, this.state)
+      (!isEqualWithDates(nextPeriod, currentPeriod) &&
+        !isEqualWithDates(
+          {
+            period: nextProps.period,
+            start: getDate(nextProps.start),
+            end: getDate(nextProps.end),
+          },
+          this.state
+        )) ||
+      !isEqual(pick(this.props, otherKeys), pick(nextProps, otherKeys))
     ) {
-      console.log('sCU', true);
       return true;
     }
 
-    console.log('sCU', false);
     return false;
   }
+
+  setPeriod = ({period, start, end}, saveHistory) => {
+    const startFormatted = getDate(start);
+    const endFormatted = getDate(end);
+
+    // Save period so that we can revert back to it when using echarts "back" navigation
+    if (saveHistory) {
+      this.history.push({
+        period: this.state.period,
+        start: this.state.start,
+        end: this.state.end,
+      });
+    }
+
+    this.setState(
+      {
+        period,
+        start: startFormatted,
+        end: endFormatted,
+      },
+      () =>
+        this.props.actions.updateParams({
+          statsPeriod: period,
+          start: startFormatted,
+          end: endFormatted,
+        })
+    );
+  };
+
+  handleZoomRestore = (evt, chart) => {
+    if (!this.history.length) {
+      return;
+    }
+
+    this.setPeriod(this.history[0]);
+
+    // reset history
+    this.history = [];
+  };
 
   handleDataZoom = (evt, chart) => {
     const model = chart.getModel();
@@ -66,53 +122,26 @@ class EventsChart extends React.Component {
     const axis = xAxis[0];
     const [firstSeries] = series;
 
-    console.log(axis.rangeStart, firstSeries.data[axis.rangeStart]);
-    const start = moment.utc(firstSeries.data[axis.rangeStart][0]);
-    const startFormatted = start.format(moment.HTML5_FMT.DATETIME_LOCAL_MS);
+    // if `rangeStart` and `rangeEnd` are null, then we are going back
+    if (axis.rangeStart === null && axis.rangeEnd === null) {
+      const previousPeriod = this.history.pop();
 
-    // Add a day so we go until the end of the day (e.g. next day at midnight)
-    const end = moment
-      .utc(firstSeries.data[axis.rangeEnd][0])
-      .add(1, 'day')
-      .subtract(1, 'second');
-    const endFormatted = end.format(moment.HTML5_FMT.DATETIME_LOCAL_MS);
+      if (!previousPeriod) {
+        return;
+      }
 
-    this.setState(
-      {
-        period: null,
-        start: start.toDate(),
-        end: end.toDate(),
-      },
-      () =>
-        this.props.actions.updateParams({
-          statsPeriod: null,
-          start: startFormatted,
-          end: endFormatted,
-        })
-    );
-  };
+      this.setPeriod(previousPeriod);
+    } else {
+      const start = moment.utc(firstSeries.data[axis.rangeStart][0]);
 
-  handleChartClick = series => {
-    if (!series) {
-      return;
+      // Add a day so we go until the end of the day (e.g. next day at midnight)
+      const end = moment
+        .utc(firstSeries.data[axis.rangeEnd][0])
+        .add(1, 'day')
+        .subtract(1, 'second');
+
+      this.setPeriod({period: null, start, end}, true);
     }
-
-    const firstSeries = series;
-
-    const date = moment(firstSeries.name);
-    const start = date.format(moment.HTML5_FMT.DATETIME_LOCAL_MS);
-
-    // Add a day so we go until the end of the day (e.g. next day at midnight)
-    const end = date
-      .add(1, 'day')
-      .subtract(1, 'second')
-      .format(moment.HTML5_FMT.DATETIME_LOCAL_MS);
-
-    this.props.actions.updateParams({
-      statsPeriod: null,
-      start,
-      end,
-    });
   };
 
   render() {
@@ -142,6 +171,14 @@ class EventsChart extends React.Component {
           {({timeseriesData, previousTimeseriesData}) => {
             return (
               <LineChart
+                onChartReady={echarts => {
+                  // Enable zoom immediately instead of having to toggle
+                  echarts.dispatchAction({
+                    type: 'takeGlobalCursor',
+                    key: 'dataZoomSelect',
+                    dataZoomSelectActive: true,
+                  });
+                }}
                 isGroupedByDate
                 useUtc={utc}
                 interval={interval === '1h' ? 'hour' : 'day'}
@@ -167,7 +204,7 @@ class EventsChart extends React.Component {
                 )}
                 onEvents={{
                   datazoom: this.handleDataZoom,
-                  click: this.handleChartClick,
+                  restore: this.handleZoomRestore,
                 }}
               />
             );
@@ -187,8 +224,8 @@ const EventsChartContainer = withRouter(
             {context => (
               <EventsChart
                 {...context}
-                projects={context.project || []}
-                environments={context.environment || []}
+                project={context.project || []}
+                environment={context.environment || []}
                 {...this.props}
               />
             )}

@@ -22,12 +22,12 @@ class EventsRequestWithParams extends React.Component {
     /**
      * List of project ids to query
      */
-    projects: PropTypes.arrayOf(PropTypes.number),
+    project: PropTypes.arrayOf(PropTypes.number),
 
     /**
      * List of environments to query
      */
-    environments: PropTypes.arrayOf(PropTypes.string),
+    environment: PropTypes.arrayOf(PropTypes.string),
 
     /**
      * Relative time period for query.
@@ -301,10 +301,10 @@ const EventsRequest = withLatestContext(
       render() {
         return (
           <EventsContext.Consumer>
-            {({projects, environments, period, filters}) => (
+            {({project, environment, period, filters}) => (
               <EventsRequestWithParams
-                projects={projects}
-                environments={environments}
+                project={project}
+                environment={environment}
                 period={period}
                 filters={filters}
                 {...this.props}
